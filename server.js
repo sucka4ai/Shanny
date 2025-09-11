@@ -1,4 +1,3 @@
-# or any editor you prefer to check the content
 // ---------------- IPTV ADDON CODE ----------------
 const { serveHTTP, addonBuilder } = require("stremio-addon-sdk");
 const fetch = require("node-fetch");
