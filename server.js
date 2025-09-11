@@ -1,4 +1,3 @@
-// ---------------- IPTV ADDON CODE ----------------
 const { serveHTTP, addonBuilder } = require("stremio-addon-sdk");
 const fetch = require("node-fetch");
 const parser = require("iptv-playlist-parser");
@@ -22,7 +21,7 @@ async function fetchM3U() {
 
         categories = new Set();
         channels = parsed.items.map((item, index) => {
-            const category = (item.group?.title || "Uncategorized").trim();
+            const category = item.group?.title || "Uncategorized";
             categories.add(category);
             return {
                 id: `channel-${index}`,
@@ -65,8 +64,6 @@ async function fetchEPG() {
     }
 }
 
-// ---------------- HELPER FUNCTIONS ----------------
-
 function getNowNext(channelId) {
     const now = dayjs();
     const programs = epgData[channelId] || [];
@@ -91,7 +88,7 @@ function getUnsplashImage(category) {
     return `https://source.unsplash.com/1600x900/?${encoded}`;
 }
 
-// ---------------- MANIFEST & ADDON ----------------
+// ---------------- MANIFEST ----------------
 
 const manifest = {
     id: "community.shannyiptv",
@@ -106,7 +103,7 @@ const manifest = {
             type: "tv",
             id: "shannyiptv",
             name: "Shanny IPTV",
-            extra: [{ name: "genre", options: ["All"] }],
+            extra: [{ name: "genre", options: ["All"] }], // updated after M3U load
         },
     ],
     idPrefixes: ["channel-"],
@@ -114,108 +111,81 @@ const manifest = {
 
 const builder = new addonBuilder(manifest);
 
-// ---------------- CATALOG HANDLER ----------------
-builder.defineCatalogHandler((args) => {
-    let selectedGenre = "All";
-    if (Array.isArray(args.extra)) {
-        const genreObj = args.extra.find(e => e.name === "genre");
-        if (genreObj && genreObj.value) selectedGenre = genreObj.value.trim();
-    }
+// ---------------- HANDLERS ----------------
 
-    let filteredChannels = channels;
-    if (selectedGenre !== "All") {
-        filteredChannels = channels.filter(c => c.category === selectedGenre);
-    }
+builder.defineCatalogHandler(({ extra }) => {
+    const genre = extra?.genre;
+    const filtered =
+        genre && genre !== "All"
+            ? channels.filter((ch) => ch.category === genre)
+            : channels;
 
-    const metas = filteredChannels.map(c => ({
-        id: c.id,
-        name: c.name,
-        type: "tv",
-        logo: c.logo,
-        poster: getUnsplashImage(c.category),
-        description: `Category: ${c.category}`,
-        releaseInfo: "",
-    }));
-
-    return Promise.resolve({ metas });
+    return Promise.resolve({
+        metas: filtered.map((ch) => ({
+            id: ch.id,
+            type: "tv",
+            name: ch.name,
+            poster: ch.logo,
+            background: getUnsplashImage(ch.category),
+            description: `Live stream for ${ch.name}`,
+        })),
+    });
 });
 
-// ---------------- STREAM HANDLER ----------------
-builder.defineStreamHandler((args) => {
-    const channel = channels.find(c => c.id === args.id);
-    if (!channel) return Promise.resolve({ streams: [] });
+builder.defineMetaHandler(({ id }) => {
+    const ch = channels.find((c) => c.id === id);
+    if (!ch) return Promise.resolve({ meta: {} });
 
-    let mimetype = "video/mp2t";
-    if (channel.url?.endsWith(".m3u8")) mimetype = "application/vnd.apple.mpegurl";
-    else if (channel.url?.endsWith(".mp4")) mimetype = "video/mp4";
+    const epg = getNowNext(ch.tvgId);
+    return Promise.resolve({
+        meta: {
+            id: ch.id,
+            type: "tv",
+            name: ch.name,
+            logo: ch.logo,
+            poster: ch.logo,
+            background: getUnsplashImage(ch.category),
+            description: `${epg.now?.title || "No EPG"} — ${
+                epg.next?.title || "No info"
+            }`,
+        },
+    });
+});
+
+builder.defineStreamHandler(({ id }) => {
+    const ch = channels.find((c) => c.id === id);
+    if (!ch) return Promise.resolve({ streams: [] });
 
     return Promise.resolve({
         streams: [
             {
-                title: channel.name,
-                url: channel.url,
-                type: "url",
-                mimetype,
-                behaviorHints: {
-                    notWebReady: false,
-                    proxyHeaders: {
-                        request: {
-                            "User-Agent": "Mozilla/5.0",
-                            "Accept": "*/*",
-                            "Accept-Encoding": "gzip, deflate, br",
-                            "Accept-Language": "en-US,en;q=0.9",
-                            "Range": "bytes=0-"
-                        }
-                    }
-                }
-            }
-        ]
+                url: ch.url,
+                title: ch.name,
+                externalUrl: true,
+            },
+        ],
     });
 });
 
-// ---------------- META HANDLER ----------------
-builder.defineMetaHandler((args) => {
-    const channel = channels.find(c => c.id === args.id);
-    if (!channel) return Promise.resolve({ meta: null });
+// ---------------- STARTUP ----------------
 
-    const nowNext = getNowNext(channel.tvgId);
-    return Promise.resolve({
-        meta: {
-            id: channel.id,
-            name: channel.name,
-            type: "tv",
-            description: nowNext.now ? `${nowNext.now.title} → ${nowNext.next?.title || ""}` : "No EPG",
-            logo: channel.logo,
-            poster: getUnsplashImage(channel.category),
-        }
-    });
-});
-
-// ---------------- START SERVER ----------------
 (async () => {
+    // Preload data before serving manifest
     await fetchM3U();
     await fetchEPG();
 
+    // Update manifest with categories if available
     if (categories.size > 0) {
         manifest.catalogs[0].extra[0].options = [
             "All",
             ...Array.from(categories).sort(),
         ];
         console.log("✅ Manifest categories updated:", manifest.catalogs[0].extra[0].options);
+    } else {
+        console.log("⚠️ No categories loaded, using default 'All' only");
     }
 
-    const port = process.env.PORT || 3000;
+    const port = process.env.PORT || 7000;
     serveHTTP(builder.getInterface(), { port });
     console.log(`🚀 Shanny IPTV Addon running on port ${port}`);
-
-    // ---------------- SELF-PING ----------------
-    const ADDON_URL = `https://your-koyeb-app.koyeb.app/manifest.json`; // replace with your actual URL
-    setInterval(async () => {
-        try {
-            await fetch(ADDON_URL);
-            console.log(`🔄 Self-ping sent at ${new Date().toLocaleTimeString()}`);
-        } catch (err) {
-            console.error("❌ Self-ping failed:", err.message);
-        }
-    }, 2 * 60 * 1000); // every 2 minutes
 })();
