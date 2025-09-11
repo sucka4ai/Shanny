@@ -4,18 +4,19 @@ const parser = require("iptv-playlist-parser");
 const xml2js = require("xml2js");
 const dayjs = require("dayjs");
 
+// ---------------- CONFIG ----------------
 const M3U_URL = process.env.M3U_URL;
 const EPG_URL = process.env.EPG_URL;
+const SELF_URL = process.env.SELF_URL; // e.g. https://your-addon.koyeb.app
 
 let channels = [];
 let epgData = {};
 let categories = new Set();
 
 // ---------------- FETCH FUNCTIONS ----------------
-
 async function fetchM3U() {
     try {
-        const res = await fetch(M3U_URL, { timeout: 15000 });
+        const res = await fetch(M3U_URL, { timeout: 20000 });
         const text = await res.text();
         const parsed = parser.parse(text);
 
@@ -27,7 +28,7 @@ async function fetchM3U() {
                 id: `channel-${index}`,
                 name: item.name,
                 url: item.url,
-                logo: item.tvg.logo,
+                logo: item.tvg.logo || "",
                 category,
                 tvgId: item.tvg.id,
             };
@@ -41,11 +42,11 @@ async function fetchM3U() {
 
 async function fetchEPG() {
     try {
-        const res = await fetch(EPG_URL, { timeout: 15000 });
+        const res = await fetch(EPG_URL, { timeout: 20000 });
         const xml = await res.text();
         const result = await xml2js.parseStringPromise(xml);
 
-        const programs = result.tv.programme || [];
+        const programs = result.tv?.programme || [];
         epgData = {};
         for (const program of programs) {
             const channelId = program.$.channel;
@@ -89,7 +90,6 @@ function getUnsplashImage(category) {
 }
 
 // ---------------- MANIFEST ----------------
-
 const manifest = {
     id: "community.shannyiptv",
     version: "1.0.0",
@@ -103,7 +103,7 @@ const manifest = {
             type: "tv",
             id: "shannyiptv",
             name: "Shanny IPTV",
-            extra: [{ name: "genre", options: ["All"] }], // updated after M3U load
+            extra: [{ name: "genre", options: ["All"] }],
         },
     ],
     idPrefixes: ["channel-"],
@@ -112,7 +112,6 @@ const manifest = {
 const builder = new addonBuilder(manifest);
 
 // ---------------- HANDLERS ----------------
-
 builder.defineCatalogHandler(({ extra }) => {
     const genre = extra?.genre;
     const filtered =
@@ -125,7 +124,7 @@ builder.defineCatalogHandler(({ extra }) => {
             id: ch.id,
             type: "tv",
             name: ch.name,
-            poster: ch.logo,
+            poster: ch.logo || undefined,
             background: getUnsplashImage(ch.category),
             description: `Live stream for ${ch.name}`,
         })),
@@ -161,31 +160,38 @@ builder.defineStreamHandler(({ id }) => {
             {
                 url: ch.url,
                 title: ch.name,
-                externalUrl: true,
+                externalUrl: false, // ensures Stremio handles the stream directly
             },
         ],
     });
 });
 
 // ---------------- STARTUP ----------------
-
 (async () => {
-    // Preload data before serving manifest
     await fetchM3U();
     await fetchEPG();
 
-    // Update manifest with categories if available
     if (categories.size > 0) {
         manifest.catalogs[0].extra[0].options = [
             "All",
             ...Array.from(categories).sort(),
         ];
         console.log("✅ Manifest categories updated:", manifest.catalogs[0].extra[0].options);
-    } else {
-        console.log("⚠️ No categories loaded, using default 'All' only");
     }
 
     const port = process.env.PORT || 7000;
     serveHTTP(builder.getInterface(), { port });
     console.log(`🚀 Shanny IPTV Addon running on port ${port}`);
+
+    // ----------- KEEP ALIVE SELF-PING -----------
+    if (SELF_URL) {
+        setInterval(async () => {
+            try {
+                await fetch(SELF_URL);
+                console.log("🔄 Self-ping successful");
+            } catch (err) {
+                console.error("❌ Self-ping failed:", err.message);
+            }
+        }, 5 * 60 * 1000); // every 5 minutes
+    }
 })();
