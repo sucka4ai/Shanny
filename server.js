@@ -8,13 +8,12 @@ const dayjs = require("dayjs");
 const M3U_URL = process.env.M3U_URL;
 const EPG_URL = process.env.EPG_URL;
 
-let channels = []; // array of channels
-let channelMap = {}; // { id: channel } for fast lookup
+let channels = [];
 let epgData = {};
 let categories = new Set();
-const REFRESH_INTERVAL = 5 * 60 * 1000; // 5 minutes
 
 // ---------------- FETCH FUNCTIONS ----------------
+
 async function fetchM3U() {
     try {
         const res = await fetch(M3U_URL, { timeout: 15000 });
@@ -29,26 +28,13 @@ async function fetchM3U() {
                 id: `channel-${index}`,
                 name: item.name,
                 url: item.url,
-                logo: item.tvg?.logo || "",
+                logo: item.tvg.logo,
                 category,
-                tvgId: item.tvg?.id || "",
+                tvgId: item.tvg.id,
             };
         });
 
-        // rebuild fast lookup map
-        channelMap = {};
-        channels.forEach(c => { channelMap[c.id] = c; });
-
-        // Update manifest categories safely
-        if (categories.size > 0) {
-            manifest.catalogs[0].extra = [{
-                name: "genre",
-                options: ["All", ...Array.from(categories).sort()]
-            }];
-        }
-
         console.log(`✅ Loaded ${channels.length} channels`);
-        console.log("✅ Manifest categories updated:", manifest.catalogs[0].extra[0].options);
     } catch (err) {
         console.error("❌ Failed to fetch M3U:", err.message);
     }
@@ -60,7 +46,7 @@ async function fetchEPG() {
         const xml = await res.text();
         const result = await xml2js.parseStringPromise(xml);
 
-        const programs = result.tv?.programme || [];
+        const programs = result.tv.programme || [];
         epgData = {};
         for (const program of programs) {
             const channelId = program.$.channel;
@@ -80,6 +66,7 @@ async function fetchEPG() {
 }
 
 // ---------------- HELPER FUNCTIONS ----------------
+
 function getNowNext(channelId) {
     const now = dayjs();
     const programs = epgData[channelId] || [];
@@ -96,7 +83,7 @@ function getNowNext(channelId) {
         }
     }
 
-    return { now, next: nextProgram };
+    return { now: nowProgram, next: nextProgram };
 }
 
 function getUnsplashImage(category) {
@@ -105,6 +92,7 @@ function getUnsplashImage(category) {
 }
 
 // ---------------- MANIFEST & ADDON ----------------
+
 const manifest = {
     id: "community.shannyiptv",
     version: "1.0.0",
@@ -128,40 +116,66 @@ const builder = new addonBuilder(manifest);
 
 // ---------------- CATALOG HANDLER ----------------
 builder.defineCatalogHandler((args) => {
-    const genre = args.extra?.find((e) => e.name === "genre")?.value;
+    // Safe handling of args.extra
+    let selectedGenre = "All";
+    if (Array.isArray(args.extra)) {
+        const genreObj = args.extra.find(e => e.name === "genre");
+        if (genreObj && genreObj.value) {
+            selectedGenre = genreObj.value;
+        }
+    }
 
-    const filteredChannels = !genre || genre === "All"
-        ? channels
-        : channels.filter(c => c.category === genre);
+    let filteredChannels = channels;
+    if (selectedGenre !== "All") {
+        filteredChannels = channels.filter(c => c.category === selectedGenre);
+    }
 
-    // only minimal data for catalog
-    const metas = filteredChannels.map(c => ({
-        id: c.id,
-        name: c.name,
-        type: "tv",
-        poster: c.logo || getUnsplashImage(c.category),
-        background: getUnsplashImage(c.category),
-    }));
-
-    return { metas };
+    return Promise.resolve({
+        metas: filteredChannels.map(c => ({
+            id: c.id,
+            name: c.name,
+            type: "tv",
+            poster: c.logo || getUnsplashImage(c.category),
+            description: c.category,
+            releaseInfo: "",
+            genre: [c.category],
+            imdbRating: 0,
+            logo: c.logo,
+            tvg: { id: c.tvgId },
+            nowNext: getNowNext(c.tvgId),
+        })),
+        extra: [
+            {
+                name: "genre",
+                options: ["All", ...Array.from(categories).sort()],
+            },
+        ],
+    });
 });
 
 // ---------------- STREAM HANDLER ----------------
 builder.defineStreamHandler((args) => {
-    const channel = channelMap[args.id];
-    if (!channel) return { streams: [] };
+    const channelId = args.id;
+    const channel = channels.find(c => c.id === channelId);
+
+    if (!channel) {
+        return Promise.resolve({ streams: [] });
+    }
 
     let mimetype = "video/mp2t";
-    if (channel.url.endsWith(".m3u8")) mimetype = "application/vnd.apple.mpegurl";
-    else if (channel.url.endsWith(".mp4")) mimetype = "video/mp4";
+    if (channel.url && channel.url.endsWith(".m3u8")) {
+        mimetype = "application/vnd.apple.mpegurl";
+    } else if (channel.url && channel.url.endsWith(".mp4")) {
+        mimetype = "video/mp4";
+    }
 
-    return {
+    return Promise.resolve({
         streams: [
             {
                 title: channel.name,
                 url: channel.url,
                 type: "url",
-                mimetype,
+                mimetype: mimetype,
                 behaviorHints: {
                     notWebReady: false,
                     proxyHeaders: {
@@ -170,30 +184,31 @@ builder.defineStreamHandler((args) => {
                             "Accept": "*/*",
                             "Accept-Encoding": "gzip, deflate, br",
                             "Accept-Language": "en-US,en;q=0.9",
-                            "Range": "bytes=0-",
-                        },
-                    },
-                },
-            },
-        ],
-    };
+                            "Range": "bytes=0-"
+                        }
+                    }
+                }
+            }
+        ]
+    });
 });
 
 // ---------------- META HANDLER ----------------
 builder.defineMetaHandler((args) => {
-    const channel = channelMap[args.id];
-    if (!channel) return null;
+    const channel = channels.find(c => c.id === args.id);
+    if (!channel) return Promise.resolve({ meta: {} });
 
-    const { now, next } = getNowNext(channel.tvgId);
-
-    return {
-        id: channel.id,
-        type: "tv",
-        name: channel.name,
-        description: now ? `${now.title} | ${next ? "Next: " + next.title : ""}` : "",
-        poster: channel.logo || getUnsplashImage(channel.category),
-        background: getUnsplashImage(channel.category),
-    };
+    return Promise.resolve({
+        meta: {
+            id: channel.id,
+            name: channel.name,
+            type: "tv",
+            poster: channel.logo || getUnsplashImage(channel.category),
+            description: channel.category,
+            genre: [channel.category],
+            nowNext: getNowNext(channel.tvgId),
+        },
+    });
 });
 
 // ---------------- START SERVER ----------------
@@ -201,13 +216,38 @@ builder.defineMetaHandler((args) => {
     await fetchM3U();
     await fetchEPG();
 
-    setInterval(async () => {
-        console.log("🔄 Refreshing M3U playlist and EPG...");
-        await fetchM3U();
-        await fetchEPG();
-    }, REFRESH_INTERVAL);
+    // Update manifest with categories
+    if (categories.size > 0) {
+        manifest.catalogs[0].extra[0].options = [
+            "All",
+            ...Array.from(categories).sort(),
+        ];
+        console.log("✅ Manifest categories updated:", manifest.catalogs[0].extra[0].options);
+    }
 
-    const port = process.env.PORT || 3000;
+    const port = process.env.PORT || 8000;
     serveHTTP(builder.getInterface(), { port });
     console.log(`🚀 Shanny IPTV Addon running on port ${port}`);
+
+    // ---------------- SELF-PING ----------------
+    const addonURL = `http://127.0.0.1:${port}/manifest.json`;
+    setInterval(async () => {
+        try {
+            await fetch(addonURL);
+            console.log(`🔄 Self-ping OK at ${new Date().toLocaleTimeString()}`);
+        } catch (err) {
+            console.error("❌ Self-ping failed:", err.message);
+        }
+    }, 2 * 60 * 1000); // every 2 minutes
+
+    // Refresh M3U periodically
+    setInterval(async () => {
+        console.log("🔄 Refreshing M3U playlist...");
+        await fetchM3U();
+        manifest.catalogs[0].extra[0].options = [
+            "All",
+            ...Array.from(categories).sort(),
+        ];
+        console.log("✅ Categories refreshed:", Array.from(categories).sort());
+    }, 10 * 60 * 1000); // every 10 minutes
 })();
