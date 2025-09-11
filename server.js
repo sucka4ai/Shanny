@@ -22,7 +22,7 @@ async function fetchM3U() {
 
         categories = new Set();
         channels = parsed.items.map((item, index) => {
-            const category = item.group?.title || "Uncategorized";
+            const category = (item.group?.title || "Uncategorized").trim();
             categories.add(category);
             return {
                 id: `channel-${index}`,
@@ -116,13 +116,10 @@ const builder = new addonBuilder(manifest);
 
 // ---------------- CATALOG HANDLER ----------------
 builder.defineCatalogHandler((args) => {
-    // Safe handling of args.extra
     let selectedGenre = "All";
     if (Array.isArray(args.extra)) {
         const genreObj = args.extra.find(e => e.name === "genre");
-        if (genreObj && genreObj.value) {
-            selectedGenre = genreObj.value;
-        }
+        if (genreObj && genreObj.value) selectedGenre = genreObj.value.trim();
     }
 
     let filteredChannels = channels;
@@ -130,44 +127,27 @@ builder.defineCatalogHandler((args) => {
         filteredChannels = channels.filter(c => c.category === selectedGenre);
     }
 
-    return Promise.resolve({
-        metas: filteredChannels.map(c => ({
-            id: c.id,
-            name: c.name,
-            type: "tv",
-            poster: c.logo || getUnsplashImage(c.category),
-            description: c.category,
-            releaseInfo: "",
-            genre: [c.category],
-            imdbRating: 0,
-            logo: c.logo,
-            tvg: { id: c.tvgId },
-            nowNext: getNowNext(c.tvgId),
-        })),
-        extra: [
-            {
-                name: "genre",
-                options: ["All", ...Array.from(categories).sort()],
-            },
-        ],
-    });
+    const metas = filteredChannels.map(c => ({
+        id: c.id,
+        name: c.name,
+        type: "tv",
+        logo: c.logo,
+        poster: getUnsplashImage(c.category),
+        description: `Category: ${c.category}`,
+        releaseInfo: "",
+    }));
+
+    return Promise.resolve({ metas });
 });
 
 // ---------------- STREAM HANDLER ----------------
 builder.defineStreamHandler((args) => {
-    const channelId = args.id;
-    const channel = channels.find(c => c.id === channelId);
-
-    if (!channel) {
-        return Promise.resolve({ streams: [] });
-    }
+    const channel = channels.find(c => c.id === args.id);
+    if (!channel) return Promise.resolve({ streams: [] });
 
     let mimetype = "video/mp2t";
-    if (channel.url && channel.url.endsWith(".m3u8")) {
-        mimetype = "application/vnd.apple.mpegurl";
-    } else if (channel.url && channel.url.endsWith(".mp4")) {
-        mimetype = "video/mp4";
-    }
+    if (channel.url?.endsWith(".m3u8")) mimetype = "application/vnd.apple.mpegurl";
+    else if (channel.url?.endsWith(".mp4")) mimetype = "video/mp4";
 
     return Promise.resolve({
         streams: [
@@ -175,7 +155,7 @@ builder.defineStreamHandler((args) => {
                 title: channel.name,
                 url: channel.url,
                 type: "url",
-                mimetype: mimetype,
+                mimetype,
                 behaviorHints: {
                     notWebReady: false,
                     proxyHeaders: {
@@ -196,18 +176,18 @@ builder.defineStreamHandler((args) => {
 // ---------------- META HANDLER ----------------
 builder.defineMetaHandler((args) => {
     const channel = channels.find(c => c.id === args.id);
-    if (!channel) return Promise.resolve({ meta: {} });
+    if (!channel) return Promise.resolve({ meta: null });
 
+    const nowNext = getNowNext(channel.tvgId);
     return Promise.resolve({
         meta: {
             id: channel.id,
             name: channel.name,
             type: "tv",
-            poster: channel.logo || getUnsplashImage(channel.category),
-            description: channel.category,
-            genre: [channel.category],
-            nowNext: getNowNext(channel.tvgId),
-        },
+            description: nowNext.now ? `${nowNext.now.title} → ${nowNext.next?.title || ""}` : "No EPG",
+            logo: channel.logo,
+            poster: getUnsplashImage(channel.category),
+        }
     });
 });
 
@@ -216,7 +196,6 @@ builder.defineMetaHandler((args) => {
     await fetchM3U();
     await fetchEPG();
 
-    // Update manifest with categories
     if (categories.size > 0) {
         manifest.catalogs[0].extra[0].options = [
             "All",
@@ -225,29 +204,18 @@ builder.defineMetaHandler((args) => {
         console.log("✅ Manifest categories updated:", manifest.catalogs[0].extra[0].options);
     }
 
-    const port = process.env.PORT || 8000;
+    const port = process.env.PORT || 3000;
     serveHTTP(builder.getInterface(), { port });
     console.log(`🚀 Shanny IPTV Addon running on port ${port}`);
 
     // ---------------- SELF-PING ----------------
-    const addonURL = `http://127.0.0.1:${port}/manifest.json`;
+    const ADDON_URL = `https://your-koyeb-app.koyeb.app/manifest.json`; // replace with your actual URL
     setInterval(async () => {
         try {
-            await fetch(addonURL);
-            console.log(`🔄 Self-ping OK at ${new Date().toLocaleTimeString()}`);
+            await fetch(ADDON_URL);
+            console.log(`🔄 Self-ping sent at ${new Date().toLocaleTimeString()}`);
         } catch (err) {
             console.error("❌ Self-ping failed:", err.message);
         }
     }, 2 * 60 * 1000); // every 2 minutes
-
-    // Refresh M3U periodically
-    setInterval(async () => {
-        console.log("🔄 Refreshing M3U playlist...");
-        await fetchM3U();
-        manifest.catalogs[0].extra[0].options = [
-            "All",
-            ...Array.from(categories).sort(),
-        ];
-        console.log("✅ Categories refreshed:", Array.from(categories).sort());
-    }, 10 * 60 * 1000); // every 10 minutes
 })();
